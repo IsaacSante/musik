@@ -63,7 +63,6 @@ class SongInfo:
                 return None
         return None
 
-
     def update_song_title(self):
         new_title = self.get_song_title()
         if new_title is None or new_title == self.current_song_title:
@@ -74,11 +73,26 @@ class SongInfo:
         self.song_title_history.append(new_title)
         return new_title
 
+    def clean_lyrics(self, lyrics: str) -> str:
+        """
+        Cleans the lyrics text by removing unwanted characters, such as music symbols.
+        
+        :param lyrics: The original lyrics string.
+        :return: The cleaned lyrics string.
+        """
+        # Remove the music symbol (♪) and any similar unwanted characters.
+        cleaned = lyrics.replace("♪", "")
+        # You can add more cleaning steps here if needed.
+        # For example, you might want to remove extra spaces:
+        cleaned_lines = [line.strip() for line in cleaned.splitlines()]
+        return "\n".join(cleaned_lines)
+
     def get_fullscreen_lyrics(self):
         """
         Finds all divs with data-testid="fullscreen-lyric",
         extracts the text content from their inner div,
         and returns all text as one block with each piece on a new line.
+        The returned lyrics are cleaned by removing unwanted symbols.
         """
         # Locate all lyric containers
         lyric_elements = self.driver.find_elements(By.CSS_SELECTOR, 'div[data-testid="fullscreen-lyric"]')
@@ -92,8 +106,9 @@ class SongInfo:
                     lyrics.append(text)
             except Exception:
                 continue
-        return "\n".join(lyrics)
-
+        # Join the lyrics and clean them before returning
+        full_lyrics = "\n".join(lyrics)
+        return self.clean_lyrics(full_lyrics)
 
     def close(self):
         """

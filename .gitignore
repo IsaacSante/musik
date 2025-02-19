@@ -3,6 +3,7 @@ repomix-output.txt
 __pycache__/
 *.py[cod]
 *$py.class
+*.png
 
 # Virtual environment
 venv/

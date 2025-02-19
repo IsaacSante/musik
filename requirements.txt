@@ -1,0 +1,9 @@
+transformers
+torch
+scikit-learn
+matplotlib
+selenium
+asyncio
+sentence-transformers
+hdbscan
+nltk

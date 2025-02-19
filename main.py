@@ -1,16 +1,22 @@
 # main.py
 import threading
 import time
+import asyncio
 from src.info.song_info import SongInfo
+from src.analyzer.lyrics_analyzer import LyricsAnalyzer
+
+async def analyze_lyrics_async(lyrics, lyrics_analyzer):
+    """
+    Runs lyrics analysis asynchronously.
+    """
+    loop = asyncio.get_event_loop()  
+    await loop.run_in_executor(None, lyrics_analyzer.analyze_lyrics, lyrics) 
 
 def main():
-    # Instantiate with headless=False to see the browser GUI.
     song_info = SongInfo(headless=False)
-    
-    # Launch the site.
+    lyrics_analyzer = LyricsAnalyzer()
+
     song_info.load_site()
-    
-    # Create an event to signal when to stop the monitoring thread.
     stop_event = threading.Event()
 
     def monitor_song_title():
@@ -19,24 +25,23 @@ def main():
             if updated_title is not None:
                 print("Current song:", updated_title)
                 print("-" * 40)
-                time.sleep(.2)
-                print(song_info.get_fullscreen_lyrics())
+                lyrics = song_info.get_fullscreen_lyrics()
+                print(lyrics)
                 print("-" * 40)
-            time.sleep(.5)
+                asyncio.run(analyze_lyrics_async(lyrics, lyrics_analyzer))
 
-    # Start the monitoring loop in a separate thread.
+            time.sleep(2)
+
     monitor_thread = threading.Thread(target=monitor_song_title)
     monitor_thread.start()
-    
-    # Wait for the user to press Enter to exit.
+
     input("Press Enter to exit and close the browser...")
-    
-    # Signal the monitoring thread to stop and wait for it to finish.
+
     stop_event.set()
     monitor_thread.join()
-    
-    # Close the browser.
+
     song_info.close()
+
 
 if __name__ == "__main__":
     main()
