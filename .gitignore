@@ -1,0 +1,63 @@
+repomix-output.txt
+# Byte-compiled / compiled files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environment
+venv/
+env/
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Logs and database files
+*.log
+*.sqlite3
+
+# Unit test and coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# macOS system files
+.DS_Store
+
+# IDE / Editor-specific files
+.vscode/
+.idea/
+*.sublime-workspace
+
+# Pipenv / Poetry
+Pipfile
+Pipfile.lock
+poetry.lock
+
+# MyPy
+.mypy_cache/
+
+# PyInstaller
+*.spec
+
+# Docker
+*.dockerfile
+
+# Local configuration
+.env
+.env.local
+.env.production
+.env.test
