@@ -10,7 +10,7 @@ async def analyze_lyrics_async(lyrics, lyrics_analyzer):
     Runs lyrics analysis asynchronously.
     """
     loop = asyncio.get_event_loop()  
-    await loop.run_in_executor(None, lyrics_analyzer.analyze_lyrics, lyrics) 
+    await loop.run_in_executor(None, lyrics_analyzer.analyze_fused_lyrics, lyrics) 
 
 def main():
     song_info = SongInfo(headless=True)
