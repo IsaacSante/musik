@@ -1,20 +1,21 @@
+import torch
 from transformers import DistilBertTokenizer, DistilBertModel
 from sentence_transformers import SentenceTransformer
 from sklearn.manifold import TSNE
-from sklearn.cluster import KMeans, AgglomerativeClustering, DBSCAN, OPTICS
-from sklearn.mixture import GaussianMixture
+from sklearn.cluster import DBSCAN, OPTICS
+from sklearn.metrics import silhouette_score
+from sklearn.neighbors import NearestNeighbors
+from sklearn.preprocessing import normalize
+from sklearn.feature_extraction.text import TfidfVectorizer
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
 import hdbscan
-import torch
-from sklearn.feature_extraction.text import TfidfVectorizer
 import nltk
 from nltk.corpus import stopwords
 import string
-from collections import defaultdict
-from sklearn.preprocessing import normalize
+from collections import defaultdict, Counter
 
 # Download stopwords if you haven't already
 try:
@@ -24,38 +25,181 @@ except LookupError:
 
 class LyricsAnalyzer:
     def __init__(self):
+        # Select device: use MPS if available, otherwise fall back to CPU.
+        if torch.backends.mps.is_available():
+            self.device = torch.device("mps")
+            print("Using MPS device for acceleration.")
+        else:
+            self.device = torch.device("cpu")
+            print("MPS not available, using CPU.")
+        
         self.distilbert_tokenizer = DistilBertTokenizer.from_pretrained('distilbert-base-uncased')
-        self.distilbert_model = DistilBertModel.from_pretrained('distilbert-base-uncased')
+        self.distilbert_model = DistilBertModel.from_pretrained('distilbert-base-uncased').to(self.device)
         self.sentence_transformer_model = SentenceTransformer('all-MiniLM-L6-v2')
-
-    def get_distilbert_embedding(self, text):
-        inputs = self.distilbert_tokenizer(text, return_tensors='pt', truncation=True, max_length=128)
+    
+    def get_distilbert_embeddings(self, texts):
+        # Batch tokenize with padding so that all texts are the same length.
+        inputs = self.distilbert_tokenizer(texts, return_tensors='pt', truncation=True, 
+                                             max_length=128, padding=True)
+        inputs = {k: v.to(self.device) for k, v in inputs.items()}
         with torch.no_grad():
             outputs = self.distilbert_model(**inputs)
-        last_hidden_state = outputs.last_hidden_state
-        embedding = last_hidden_state.mean(dim=1)
-        return embedding.squeeze().numpy()
+        # Mean pooling over tokens to get sentence embeddings.
+        last_hidden_state = outputs.last_hidden_state  # (batch_size, seq_len, hidden_dim)
+        embeddings = last_hidden_state.mean(dim=1)       # (batch_size, hidden_dim)
+        return embeddings.cpu().numpy()
+    
+    def get_sentence_transformer_embeddings(self, texts):
+        # SentenceTransformer can process a batch directly.
+        return self.sentence_transformer_model.encode(texts)
+    
+    def tune_clustering(self, embeddings, lines, model_type="DBSCAN"):
+        best_score = -1  # Initialize with a low score
+        best_params = None
+        best_labels = None
 
-    def get_sentence_transformer_embedding(self, text):
-        return self.sentence_transformer_model.encode(text)
+        if model_type == "DBSCAN":
+            # Baseline eps guess: mean distance to the nearest neighbor.
+            nearest_neighbors = NearestNeighbors(n_neighbors=min(5, len(embeddings) - 1))
+            nearest_neighbors.fit(embeddings)
+            distances, _ = nearest_neighbors.kneighbors(embeddings)
+            avg_nearest_neighbor_dist = np.mean(distances[:, 1])
+            eps_values = [avg_nearest_neighbor_dist * scale for scale in [0.5, 0.75, 1.0, 1.25]]
+            min_samples_values = [2, 3, 4] if len(embeddings) > 5 else [1, 2]
 
-    def cluster_lyrics(self, embeddings, lines, model_name, min_cluster_size=3):
+            for eps in eps_values:
+                for min_samples in min_samples_values:
+                    try:
+                        dbscan = DBSCAN(eps=eps, min_samples=min_samples)
+                        labels = dbscan.fit_predict(embeddings)
+                        if len(np.unique(labels)) > 1 and len(labels) > 1:
+                            score = silhouette_score(embeddings, labels)
+                        else:
+                            score = -2
+                        print(f"DBSCAN: eps={eps}, min_samples={min_samples}, Silhouette={score}")
+                        if score > best_score:
+                            best_score = score
+                            best_params = {'eps': eps, 'min_samples': min_samples}
+                            best_labels = labels
+                    except Exception as e:
+                        print(f"Error with eps={eps}, min_samples={min_samples}: {e}")
+
+            print(f"\nBEST DBSCAN: {best_params}, Silhouette={best_score}")
+            return best_labels, best_params, best_score
+
+        elif model_type == "HDBSCAN":
+            min_cluster_size_values = [2, 3, 5]
+            cluster_selection_epsilon_values = [0.0, 0.1, 0.2]
+
+            for min_cluster_size in min_cluster_size_values:
+                for cluster_selection_epsilon in cluster_selection_epsilon_values:
+                    try:
+                        hdbscan_model = hdbscan.HDBSCAN(min_cluster_size=min_cluster_size, 
+                                                        cluster_selection_epsilon=cluster_selection_epsilon)
+                        labels = hdbscan_model.fit_predict(embeddings)
+                        if len(np.unique(labels)) > 1 and len(labels) > 1:
+                            score = silhouette_score(embeddings, labels)
+                        else:
+                            score = -2
+                        print(f"HDBSCAN: min_cluster_size={min_cluster_size}, "
+                              f"cluster_selection_epsilon={cluster_selection_epsilon}, Silhouette={score}")
+                        if score > best_score:
+                            best_score = score
+                            best_params = {'min_cluster_size': min_cluster_size, 
+                                           'cluster_selection_epsilon': cluster_selection_epsilon}
+                            best_labels = labels
+                    except Exception as e:
+                        print(f"Error with min_cluster_size={min_cluster_size}, "
+                              f"cluster_selection_epsilon={cluster_selection_epsilon}: {e}")
+
+            print(f"\nBEST HDBSCAN: {best_params}, Silhouette={best_score}")
+            return best_labels, best_params, best_score
+
+        elif model_type == "OPTICS":
+            min_samples_values = [2, 3, 4] if len(embeddings) > 5 else [1, 2]
+            max_eps_values = [0.5, 0.75, 1.0]
+
+            for min_samples in min_samples_values:
+                for max_eps in max_eps_values:
+                    try:
+                        optics_model = OPTICS(min_samples=min_samples, max_eps=max_eps, cluster_method='xi')
+                        labels = optics_model.fit_predict(embeddings)
+                        if len(np.unique(labels)) > 1 and len(labels) > 1:
+                            score = silhouette_score(embeddings, labels)
+                        else:
+                            score = -2
+                        print(f"OPTICS: min_samples={min_samples}, max_eps={max_eps}, Silhouette={score}")
+                        if score > best_score:
+                            best_score = score
+                            best_params = {'min_samples': min_samples, 'max_eps': max_eps}
+                            best_labels = labels
+                    except Exception as e:
+                        print(f"Error with min_samples={min_samples}, max_eps={max_eps}: {e}")
+
+            print(f"\nBEST OPTICS: {best_params}, Silhouette={best_score}")
+            return best_labels, best_params, best_score
+
+    def rank_clusterings(self, embeddings, lines, labels):
+        """
+        Ranks the clustering based on metrics derived from a 2D projection of the embeddings.
+        Returns a dictionary with dispersion, coherence, and spread.
+        """
         emb_array = np.array(embeddings)
-        clusterer = hdbscan.HDBSCAN(min_cluster_size=min_cluster_size)
-        labels = clusterer.fit_predict(emb_array)
+        tsne = TSNE(n_components=2, random_state=42, perplexity=min(10, len(lines) - 1))
+        emb_2d = tsne.fit_transform(emb_array)
 
+        dispersion = np.mean(np.linalg.norm(emb_2d - np.mean(emb_2d, axis=0), axis=1))
+        # Coherence: average intra-cluster distance (skip noise cluster)
+        cluster_centers = defaultdict(list)
+        for i, label in enumerate(labels):
+            cluster_centers[label].append(emb_2d[i])
+        coherence = 0
+        count = 0
+        for label, points in cluster_centers.items():
+            if label == -1 or len(points) < 2:
+                continue
+            center = np.mean(points, axis=0)
+            coherence += np.mean(np.linalg.norm(points - center, axis=1))
+            count += 1
+        coherence = coherence / count if count else float('inf')
+        # Spread: penalizes the largest cluster's spread on dimension 2.
+        cluster_sizes = {label: np.sum(labels == label) for label in np.unique(labels)}
+        largest_cluster_id = max(cluster_sizes, key=cluster_sizes.get)
+        if largest_cluster_id == -1 or cluster_sizes[largest_cluster_id] <= 1:
+            spread = 0
+        else:
+            largest_cluster_points = emb_2d[labels == largest_cluster_id]
+            center = np.mean(largest_cluster_points, axis=0)
+            distances = np.abs(largest_cluster_points[:, 1] - center[1])
+            spread = -np.max(distances)
+        return {'dispersion': dispersion, 'coherence': coherence, 'spread': spread}
+
+    def cluster_lyrics(self, embeddings, lines, model_name, labels):
+        """Prints cluster results based on pre-computed labels."""
         print(f"\nCluster Results for {model_name}:")
         for i, line in enumerate(lines):
             print(f"Cluster {labels[i]}: {line}")
         return labels
 
-    def visualize_embeddings(self, embeddings, lines, model_name):
+    def visualize_embeddings(self, embeddings, lines, model_name, labels):
+        """Visualizes embeddings using t-SNE with provided labels."""
         emb_array = np.array(embeddings)
         tsne = TSNE(n_components=2, random_state=42, perplexity=min(10, len(lines) - 1))
         emb_2d = tsne.fit_transform(emb_array)
 
         plt.figure(figsize=(8, 6))
-        plt.scatter(emb_2d[:, 0], emb_2d[:, 1])
+        scatter = plt.scatter(emb_2d[:, 0], emb_2d[:, 1], c=labels, cmap="viridis")
+
+        legend_elements = [plt.Line2D([0], [0], marker='o', color='w',
+                                      label=f"Cluster {i}",
+                                      markerfacecolor=scatter.cmap(scatter.norm(i)),
+                                      markersize=8)
+                           for i in np.unique(labels) if i != -1]
+
+        if -1 in np.unique(labels):
+            legend_elements.append(plt.Line2D([0], [0], marker='x', color='w',
+                                              label='Noise', markerfacecolor='gray', markersize=8))
+        plt.legend(handles=legend_elements, loc="best")
 
         for i, line in enumerate(lines):
             plt.annotate(line, (emb_2d[i, 0], emb_2d[i, 1]), fontsize=9)
@@ -71,30 +215,24 @@ class LyricsAnalyzer:
         """Generates names for each cluster based on frequent words."""
         cluster_names = {}
         for cluster_id in np.unique(labels):
-            if cluster_id == -1:  # Handle noise cluster
+            if cluster_id == -1:
                 cluster_names[cluster_id] = "Noise"
                 continue
-
             cluster_lines = [lines[i] for i, label in enumerate(labels) if label == cluster_id]
             all_words = ' '.join(cluster_lines).lower()
-
-            # Tokenize the words and remove punctuation
             words = [word for word in all_words.split() if word not in string.punctuation]
-            from collections import Counter
             word_counts = Counter(words)
             most_common_words = [word for word, count in word_counts.most_common(3)]
             cluster_names[cluster_id] = ", ".join(most_common_words)
-
         return cluster_names
 
     def extract_keywords(self, labels, lines):
         """Extracts keywords for each cluster using TF-IDF."""
         cluster_keywords = {}
         for cluster_id in np.unique(labels):
-            if cluster_id == -1:  # Handle noise cluster
+            if cluster_id == -1:
                 cluster_keywords[cluster_id] = ["noise"]
                 continue
-
             cluster_lines = [lines[i] for i, label in enumerate(labels) if label == cluster_id]
             vectorizer = TfidfVectorizer()
             tfidf_matrix = vectorizer.fit_transform(cluster_lines)
@@ -104,219 +242,90 @@ class LyricsAnalyzer:
             top_keywords = [word for word, score in term_scores[:5]]
             cluster_keywords[cluster_id] = top_keywords
             print(f"Cluster {cluster_id} Keywords: {top_keywords}")
-
         return cluster_keywords
-
-    def calculate_embedding_dispersion(self, embeddings):
-        """Calculates how dispersed the embeddings are from the center."""
-        center = np.mean(embeddings, axis=0)
-        distances = np.linalg.norm(embeddings - center, axis=1)
-        mean_distance = np.mean(distances)
-        return mean_distance
-
-    def calculate_color_coherence(self, embeddings, labels):
-        """Calculates the coherence of colors based on cluster labels."""
-        cluster_centers = defaultdict(list)
-        for i, label in enumerate(labels):
-            cluster_centers[label].append(embeddings[i])
-
-        coherence_score = 0
-        for label, embeddings_in_cluster in cluster_centers.items():
-            if label == -1:
-                continue
-            embeddings_in_cluster = np.array(embeddings_in_cluster)
-            center = np.mean(embeddings_in_cluster, axis=0)
-            distances = np.linalg.norm(embeddings_in_cluster - center, axis=1)
-            coherence_score += np.mean(distances)
-
-        num_clusters = len(cluster_centers) - (1 if -1 in cluster_centers else 0)
-        if num_clusters > 0:
-            coherence_score /= num_clusters
-        else:
-            coherence_score = float('inf')
-
-        return coherence_score
-
-    def analyze_largest_cluster_spread(self, emb_2d, labels):
-        """Calculates a score penalizing spread from the center of the largest cluster, focusing on dimension 2."""
-        cluster_sizes = {}
-        for label in np.unique(labels):
-            cluster_sizes[label] = np.sum(labels == label)
-
-        largest_cluster_id = max(cluster_sizes, key=cluster_sizes.get)
-        if largest_cluster_id == -1 or cluster_sizes[largest_cluster_id] <= 1:
-            return 0
-
-        largest_cluster_points = emb_2d[labels == largest_cluster_id]
-        if len(largest_cluster_points) == 0:
-            return 0
-
-        cluster_center = np.mean(largest_cluster_points, axis=0)
-        distances = np.abs(largest_cluster_points[:, 1] - cluster_center[1])
-        max_distance = np.max(distances)
-        penalty = -max_distance
-        return penalty
-
-    def rank_clusterings(self, embeddings, lines):
-        """Ranks clustering methods based on normalized dispersion, coherence, and largest cluster spread."""
-        emb_array = np.array(embeddings)
-        tsne = TSNE(n_components=2, random_state=42, perplexity=min(10, len(lines) - 1))
-        emb_2d = tsne.fit_transform(emb_array)
-
-        clustering_methods = {
-            # "KMeans_k5": KMeans(n_clusters=5, random_state=42, n_init=10),
-            # "KMeans_k7": KMeans(n_clusters=7, random_state=42, n_init=10),
-            # "Agglomerative_ward_k5": AgglomerativeClustering(n_clusters=5, linkage='ward'),
-            # "Agglomerative_complete_k5": AgglomerativeClustering(n_clusters=5, linkage='complete'),
-            # "Agglomerative_average_k5": AgglomerativeClustering(n_clusters=5, linkage='average'),
-            # "Agglomerative_single_k5": AgglomerativeClustering(n_clusters=5, linkage='single'),
-            "DBSCAN": DBSCAN(eps=0.5, min_samples=2),
-            "HDBSCAN_min3": hdbscan.HDBSCAN(min_cluster_size=3),
-            "HDBSCAN_min5": hdbscan.HDBSCAN(min_cluster_size=5),
-            # "GaussianMixture_k5": GaussianMixture(n_components=5, random_state=42),
-            # "GaussianMixture_k7": GaussianMixture(n_components=7, random_state=42),
-            "OPTICS": OPTICS(min_samples=2, max_eps=0.5, cluster_method='xi')
-        }
-
-        # Containers for raw scores
-        dispersion_scores = {}
-        coherence_scores = {}
-        spread_scores = {}
-
-        for method_name, model in clustering_methods.items():
-            try:
-                if method_name.startswith("GaussianMixture"):
-                    labels = model.fit_predict(emb_array)
-                else:
-                    labels = model.fit_predict(emb_array)
-
-                # Note: dispersion does not depend on labels and is computed from emb_2d.
-                dispersion_scores[method_name] = self.calculate_embedding_dispersion(emb_2d)
-                coherence_scores[method_name] = self.calculate_color_coherence(emb_2d, labels)
-                spread_scores[method_name] = self.analyze_largest_cluster_spread(emb_2d, labels)
-            except Exception as e:
-                print(f"Error during clustering with {method_name}: {e}")
-                dispersion_scores[method_name] = np.nan
-                coherence_scores[method_name] = np.nan
-                spread_scores[method_name] = np.nan
-
-        # Helper: min-max normalization for a dictionary of scores.
-        def normalize_dict(scores_dict):
-            values = np.array(list(scores_dict.values()), dtype=float)
-            min_val, max_val = np.nanmin(values), np.nanmax(values)
-            # Handle the case where all values are the same.
-            if max_val - min_val == 0:
-                return {k: 0.0 for k in scores_dict}
-            return {k: (v - min_val) / (max_val - min_val) if not np.isnan(v) else np.nan 
-                    for k, v in scores_dict.items()}
-
-
-        norm_dispersion = normalize_dict(dispersion_scores)
-        norm_coherence = normalize_dict(coherence_scores)
-        norm_spread = normalize_dict(spread_scores)
-
-        rankings = {}
-        # Combine normalized metrics (weights can be adjusted)
-        for method in clustering_methods.keys():
-            rankings[method] = norm_spread.get(method, 0) - norm_dispersion.get(method, 0) - norm_coherence.get(method, 0)
-
-        sorted_rankings = sorted(rankings.items(), key=lambda item: item[1], reverse=True)
-        return sorted_rankings
-
-    def visualize_all_clusterings(self, embeddings, lines, model_name, all_rankings):
-        """
-        Generates and saves t-SNE plots for multiple clustering methods applied to the given embeddings.
-        The image filenames include both the model name and the clustering method.
-        """
-        emb_array = np.array(embeddings)
-        tsne = TSNE(n_components=2, random_state=42, perplexity=min(10, len(lines) - 1))
-        emb_2d = tsne.fit_transform(emb_array)
-
-        clustering_methods = {
-            # "KMeans_k5": KMeans(n_clusters=5, random_state=42, n_init=10),
-            # "KMeans_k7": KMeans(n_clusters=7, random_state=42, n_init=10),
-            # "Agglomerative_ward_k5": AgglomerativeClustering(n_clusters=5, linkage='ward'),
-            # "Agglomerative_complete_k5": AgglomerativeClustering(n_clusters=5, linkage='complete'),
-            # "Agglomerative_average_k5": AgglomerativeClustering(n_clusters=5, linkage='average'),
-            # "Agglomerative_single_k5": AgglomerativeClustering(n_clusters=5, linkage='single'),
-            "DBSCAN": DBSCAN(eps=0.5, min_samples=2),
-            "HDBSCAN_min3": hdbscan.HDBSCAN(min_cluster_size=3),
-            # "HDBSCAN_min5": hdbscan.HDBSCAN(min_cluster_size=5),
-            # "GaussianMixture_k5": GaussianMixture(n_components=5, random_state=42),
-            # "GaussianMixture_k7": GaussianMixture(n_components=7, random_state=42),
-            "OPTICS": OPTICS(min_samples=2, max_eps=0.5, cluster_method='xi')
-        }
-
-        for method_name, model in clustering_methods.items():
-            try:
-                if method_name.startswith("GaussianMixture"):
-                    labels = model.fit_predict(emb_array)
-                else:
-                    labels = model.fit_predict(emb_array)
-
-                cluster_names = self.generate_cluster_names(labels, lines)
-                cluster_keywords = self.extract_keywords(labels, lines)
-
-                plt.figure(figsize=(8, 6))
-                scatter = plt.scatter(emb_2d[:, 0], emb_2d[:, 1], c=labels, cmap="viridis", s=50)
-                legend_elements = [plt.Line2D([0], [0], marker='o', color='w',
-                                              label=f"{cluster_names[i]}",
-                                              markerfacecolor=scatter.cmap(scatter.norm(i)),
-                                              markersize=8)
-                                   for i in np.unique(labels) if i != -1]
-                if -1 in np.unique(labels):
-                    legend_elements.append(
-                        plt.Line2D([0], [0], marker='x', color='w',
-                                   label=f"{cluster_names[-1]}",
-                                   markerfacecolor='gray', markersize=8))
-                plt.legend(handles=legend_elements, loc="best")
-                ranking_score = next((score for method, score in all_rankings if method == method_name), "N/A")
-                plt.title(f"{model_name} - {method_name} (Score: {ranking_score:.2f})")
-                plt.xlabel("Dimension 1")
-                plt.ylabel("Dimension 2")
-
-                for i, txt in enumerate(lines):
-                    plt.annotate(txt, (emb_2d[i, 0], emb_2d[i, 1]), fontsize=8)
-
-                plt.savefig(f"lyric_embeddings_{model_name}_{method_name}.png")
-                plt.close()
-            except Exception as e:
-                print(f"Error during clustering with {method_name}: {e}")
 
     def analyze_lyrics(self, lyrics):
         lines = [line.strip() for line in lyrics.split("\n") if line.strip()]
-        lines = [line for line in lines if line]
-
         if not lines:
             print("No lyrics to analyze.")
             return
 
-        # Process using DistilBERT embeddings.
-        distilbert_embeddings = [self.get_distilbert_embedding(line) for line in lines]
-        # Normalize the embeddings so that each vector is L2-normalized.
+        # Compute DistilBERT embeddings in batch.
+        print("Computing DistilBERT embeddings in batch...")
+        distilbert_embeddings = self.get_distilbert_embeddings(lines)
         distilbert_embeddings = normalize(np.array(distilbert_embeddings))
 
-        print("DistilBERT Clustering:")
-        self.cluster_lyrics(distilbert_embeddings, lines, "DistilBERT")
-        self.visualize_embeddings(distilbert_embeddings, lines, "DistilBERT")
-        distilbert_rankings = self.rank_clusterings(distilbert_embeddings, lines)
-
-        # Process using SentenceTransformer embeddings.
-        sentence_transformer_embeddings = [self.get_sentence_transformer_embedding(line) for line in lines]
+        # Compute SentenceTransformer embeddings in batch.
+        print("Computing SentenceTransformer embeddings in batch...")
+        sentence_transformer_embeddings = self.get_sentence_transformer_embeddings(lines)
         sentence_transformer_embeddings = normalize(np.array(sentence_transformer_embeddings))
 
-        print("\nSentenceTransformer Clustering:")
-        self.cluster_lyrics(sentence_transformer_embeddings, lines, "SentenceTransformer")
-        self.visualize_embeddings(sentence_transformer_embeddings, lines, "SentenceTransformer")
-        sentence_transformer_rankings = self.rank_clusterings(sentence_transformer_embeddings, lines)
+        # ---------------------------
+        # DBSCAN Clustering
+        # ---------------------------
+        print("DistilBERT Clustering with DBSCAN:")
+        distilbert_labels_dbscan, distilbert_params_dbscan, distilbert_score_dbscan = self.tune_clustering(distilbert_embeddings, lines, "DBSCAN")
+        
+        print("\nSentenceTransformer Clustering with DBSCAN:")
+        sentence_transformer_labels_dbscan, sentence_transformer_params_dbscan, sentence_transformer_score_dbscan = self.tune_clustering(sentence_transformer_embeddings, lines, "DBSCAN")
+        
+        # Print and visualize DBSCAN results.
+        self.cluster_lyrics(distilbert_embeddings, lines, "DistilBERT DBSCAN", distilbert_labels_dbscan)
+        self.visualize_embeddings(distilbert_embeddings, lines, "DistilBERT DBSCAN", distilbert_labels_dbscan)
+        self.cluster_lyrics(sentence_transformer_embeddings, lines, "SentenceTransformer DBSCAN", sentence_transformer_labels_dbscan)
+        self.visualize_embeddings(sentence_transformer_embeddings, lines, "SentenceTransformer DBSCAN", sentence_transformer_labels_dbscan)
 
-        # Combine and print rankings.
-        all_rankings = {f"DistilBERT_{k}": v for k, v in dict(distilbert_rankings).items()}
-        all_rankings.update({f"SentenceTransformer_{k}": v for k, v in dict(sentence_transformer_rankings).items()})
-        sorted_all_rankings = sorted(all_rankings.items(), key=lambda item: item[1], reverse=True)
-        rankings_string = "\n".join([f"{method}: {score}" for method, score in sorted_all_rankings])
-        print("\nAll Clustering Rankings:\n" + rankings_string)
+        # ---------------------------
+        # HDBSCAN Clustering
+        # ---------------------------
+        print("\nDistilBERT Clustering with HDBSCAN:")
+        distilbert_labels_hdbscan, distilbert_params_hdbscan, distilbert_score_hdbscan = self.tune_clustering(distilbert_embeddings, lines, "HDBSCAN")
+        
+        print("\nSentenceTransformer Clustering with HDBSCAN:")
+        sentence_transformer_labels_hdbscan, sentence_transformer_params_hdbscan, sentence_transformer_score_hdbscan = self.tune_clustering(sentence_transformer_embeddings, lines, "HDBSCAN")
+        
+        # Print and visualize HDBSCAN results.
+        self.cluster_lyrics(distilbert_embeddings, lines, "DistilBERT HDBSCAN", distilbert_labels_hdbscan)
+        self.visualize_embeddings(distilbert_embeddings, lines, "DistilBERT HDBSCAN", distilbert_labels_hdbscan)
+        self.cluster_lyrics(sentence_transformer_embeddings, lines, "SentenceTransformer HDBSCAN", sentence_transformer_labels_hdbscan)
+        self.visualize_embeddings(sentence_transformer_embeddings, lines, "SentenceTransformer HDBSCAN", sentence_transformer_labels_hdbscan)
 
-        # Visualize clusterings for each method.
-        self.visualize_all_clusterings(distilbert_embeddings, lines, "DistilBERT", distilbert_rankings)
-        self.visualize_all_clusterings(sentence_transformer_embeddings, lines, "SentenceTransformer", sentence_transformer_rankings)
+        # ---------------------------
+        # OPTICS Clustering
+        # ---------------------------
+        print("\nDistilBERT Clustering with OPTICS:")
+        distilbert_labels_optics, distilbert_params_optics, distilbert_score_optics = self.tune_clustering(distilbert_embeddings, lines, "OPTICS")
+        
+        print("\nSentenceTransformer Clustering with OPTICS:")
+        sentence_transformer_labels_optics, sentence_transformer_params_optics, sentence_transformer_score_optics = self.tune_clustering(sentence_transformer_embeddings, lines, "OPTICS")
+        
+        # Print and visualize OPTICS results.
+        self.cluster_lyrics(distilbert_embeddings, lines, "DistilBERT OPTICS", distilbert_labels_optics)
+        self.visualize_embeddings(distilbert_embeddings, lines, "DistilBERT OPTICS", distilbert_labels_optics)
+        self.cluster_lyrics(sentence_transformer_embeddings, lines, "SentenceTransformer OPTICS", sentence_transformer_labels_optics)
+        self.visualize_embeddings(sentence_transformer_embeddings, lines, "SentenceTransformer OPTICS", sentence_transformer_labels_optics)
+
+        # ---------------------------
+        # Ranking Clustering Results
+        # ---------------------------
+        # Combine silhouette scores from all methods.
+        all_rankings = {
+            "DistilBERT_DBSCAN": distilbert_score_dbscan,
+            "SentenceTransformer_DBSCAN": sentence_transformer_score_dbscan,
+            "DistilBERT_HDBSCAN": distilbert_score_hdbscan,
+            "SentenceTransformer_HDBSCAN": sentence_transformer_score_hdbscan,
+            "DistilBERT_OPTICS": distilbert_score_optics,
+            "SentenceTransformer_OPTICS": sentence_transformer_score_optics,
+        }
+        sorted_rankings = sorted(all_rankings.items(), key=lambda item: item[1], reverse=True)
+        print("\nClustering Rankings (by Silhouette Score):")
+        for method, score in sorted_rankings:
+            print(f"{method}: {score}")
+
+        # Optionally, compute additional ranking metrics for DBSCAN as an example.
+        rank_metrics_distilbert = self.rank_clusterings(distilbert_embeddings, lines, distilbert_labels_dbscan)
+        rank_metrics_sentence = self.rank_clusterings(sentence_transformer_embeddings, lines, sentence_transformer_labels_dbscan)
+        print("\nAdditional Ranking Metrics (using DBSCAN results):")
+        print(f"DistilBERT DBSCAN: {rank_metrics_distilbert}")
+        print(f"SentenceTransformer DBSCAN: {rank_metrics_sentence}")
+

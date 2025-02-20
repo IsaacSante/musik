@@ -25,7 +25,7 @@ def main():
             if updated_title is not None:
                 print("Current song:", updated_title)
                 print("-" * 40)
-                time.sleep(2)
+                time.sleep(1)
                 lyrics = song_info.get_fullscreen_lyrics()
                 print(lyrics)
                 print("-" * 40)
