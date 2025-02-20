@@ -13,7 +13,7 @@ async def analyze_lyrics_async(lyrics, lyrics_analyzer):
     await loop.run_in_executor(None, lyrics_analyzer.analyze_lyrics, lyrics) 
 
 def main():
-    song_info = SongInfo(headless=False)
+    song_info = SongInfo(headless=True)
     lyrics_analyzer = LyricsAnalyzer()
 
     song_info.load_site()

@@ -2,16 +2,14 @@ import torch
 from transformers import DistilBertTokenizer, DistilBertModel
 from sentence_transformers import SentenceTransformer
 from sklearn.manifold import TSNE
-from sklearn.cluster import DBSCAN, OPTICS
+from sklearn.cluster import OPTICS
 from sklearn.metrics import silhouette_score
-from sklearn.neighbors import NearestNeighbors
 from sklearn.preprocessing import normalize
 from sklearn.feature_extraction.text import TfidfVectorizer
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
-import hdbscan
 import nltk
 from nltk.corpus import stopwords
 import string
@@ -22,6 +20,9 @@ try:
     stopwords.words('english')
 except LookupError:
     nltk.download('stopwords')
+
+# Define the size difference percentage threshold at the top
+SIZE_DIFFERENCE_THRESHOLD = 500  # You can change this value
 
 class LyricsAnalyzer:
     def __init__(self):
@@ -53,69 +54,12 @@ class LyricsAnalyzer:
         # SentenceTransformer can process a batch directly.
         return self.sentence_transformer_model.encode(texts)
     
-    def tune_clustering(self, embeddings, lines, model_type="DBSCAN"):
+    def tune_clustering(self, embeddings, lines, model_type="OPTICS"):
         best_score = -1  # Initialize with a low score
         best_params = None
         best_labels = None
 
-        if model_type == "DBSCAN":
-            # Baseline eps guess: mean distance to the nearest neighbor.
-            nearest_neighbors = NearestNeighbors(n_neighbors=min(5, len(embeddings) - 1))
-            nearest_neighbors.fit(embeddings)
-            distances, _ = nearest_neighbors.kneighbors(embeddings)
-            avg_nearest_neighbor_dist = np.mean(distances[:, 1])
-            eps_values = [avg_nearest_neighbor_dist * scale for scale in [0.5, 0.75, 1.0, 1.25]]
-            min_samples_values = [2, 3, 4] if len(embeddings) > 5 else [1, 2]
-
-            for eps in eps_values:
-                for min_samples in min_samples_values:
-                    try:
-                        dbscan = DBSCAN(eps=eps, min_samples=min_samples)
-                        labels = dbscan.fit_predict(embeddings)
-                        if len(np.unique(labels)) > 1 and len(labels) > 1:
-                            score = silhouette_score(embeddings, labels)
-                        else:
-                            score = -2
-                        print(f"DBSCAN: eps={eps}, min_samples={min_samples}, Silhouette={score}")
-                        if score > best_score:
-                            best_score = score
-                            best_params = {'eps': eps, 'min_samples': min_samples}
-                            best_labels = labels
-                    except Exception as e:
-                        print(f"Error with eps={eps}, min_samples={min_samples}: {e}")
-
-            print(f"\nBEST DBSCAN: {best_params}, Silhouette={best_score}")
-            return best_labels, best_params, best_score
-
-        elif model_type == "HDBSCAN":
-            min_cluster_size_values = [2, 3, 5]
-            cluster_selection_epsilon_values = [0.0, 0.1, 0.2]
-
-            for min_cluster_size in min_cluster_size_values:
-                for cluster_selection_epsilon in cluster_selection_epsilon_values:
-                    try:
-                        hdbscan_model = hdbscan.HDBSCAN(min_cluster_size=min_cluster_size, 
-                                                        cluster_selection_epsilon=cluster_selection_epsilon)
-                        labels = hdbscan_model.fit_predict(embeddings)
-                        if len(np.unique(labels)) > 1 and len(labels) > 1:
-                            score = silhouette_score(embeddings, labels)
-                        else:
-                            score = -2
-                        print(f"HDBSCAN: min_cluster_size={min_cluster_size}, "
-                              f"cluster_selection_epsilon={cluster_selection_epsilon}, Silhouette={score}")
-                        if score > best_score:
-                            best_score = score
-                            best_params = {'min_cluster_size': min_cluster_size, 
-                                           'cluster_selection_epsilon': cluster_selection_epsilon}
-                            best_labels = labels
-                    except Exception as e:
-                        print(f"Error with min_cluster_size={min_cluster_size}, "
-                              f"cluster_selection_epsilon={cluster_selection_epsilon}: {e}")
-
-            print(f"\nBEST HDBSCAN: {best_params}, Silhouette={best_score}")
-            return best_labels, best_params, best_score
-
-        elif model_type == "OPTICS":
+        if model_type == "OPTICS":
             min_samples_values = [2, 3, 4] if len(embeddings) > 5 else [1, 2]
             max_eps_values = [0.5, 0.75, 1.0]
 
@@ -138,6 +82,8 @@ class LyricsAnalyzer:
 
             print(f"\nBEST OPTICS: {best_params}, Silhouette={best_score}")
             return best_labels, best_params, best_score
+        else:
+            raise ValueError(f"Unsupported clustering model type: {model_type}")
 
     def rank_clusterings(self, embeddings, lines, labels):
         """
@@ -181,24 +127,67 @@ class LyricsAnalyzer:
             print(f"Cluster {labels[i]}: {line}")
         return labels
 
-    def visualize_embeddings(self, embeddings, lines, model_name, labels):
-        """Visualizes embeddings using t-SNE with provided labels."""
+    def visualize_embeddings(self, embeddings, lines, model_name, labels, nested_labels=None, original_labels=None):
+        """Visualizes embeddings using t-SNE with provided labels, including nested visualization."""
         emb_array = np.array(embeddings)
         tsne = TSNE(n_components=2, random_state=42, perplexity=min(10, len(lines) - 1))
         emb_2d = tsne.fit_transform(emb_array)
 
         plt.figure(figsize=(8, 6))
-        scatter = plt.scatter(emb_2d[:, 0], emb_2d[:, 1], c=labels, cmap="viridis")
 
-        legend_elements = [plt.Line2D([0], [0], marker='o', color='w',
-                                      label=f"Cluster {i}",
-                                      markerfacecolor=scatter.cmap(scatter.norm(i)),
-                                      markersize=8)
-                           for i in np.unique(labels) if i != -1]
+        # Plot original clusters as background (optional)
+        if original_labels is not None:
+            scatter = plt.scatter(emb_2d[:, 0], emb_2d[:, 1], c=original_labels, cmap="Pastel1", alpha=0.5, label="Original Clusters")
 
-        if -1 in np.unique(labels):
-            legend_elements.append(plt.Line2D([0], [0], marker='x', color='w',
-                                              label='Noise', markerfacecolor='gray', markersize=8))
+        # Plot nested clusters on top
+        scatter = plt.scatter(emb_2d[:, 0], emb_2d[:, 1], c=labels, cmap="viridis", label="Nested Clusters")
+
+
+        # Create a unified legend, handling the possibility that only some points have both original
+        # and nested cluster labels
+        legend_elements = []
+
+        # Get a set of all unique labels used (original and nested)
+        all_unique_labels = set(np.unique(labels))
+        if original_labels is not None:
+            all_unique_labels.update(np.unique(original_labels))
+        all_unique_labels = sorted(list(all_unique_labels))
+
+        for i in all_unique_labels:
+
+            marker = 'o' # Default to circle
+
+            if original_labels is not None and i in original_labels:
+                label_text = f"Original Cluster {i}"
+
+            if i in labels:
+                label_text = f"Nested Cluster {i}"
+
+            if i == -1:
+                marker='x' # Noise marker
+                label_text = 'Noise'
+            else:
+                label_text = f"Cluster {i}"
+
+            if i in labels:
+                 cmap = scatter.cmap
+                 norm = scatter.norm
+                 facecolor = cmap(norm(i))
+
+            elif original_labels is not None and i in original_labels:
+                 # Assuming pastel colormap exists
+                 cmap = plt.cm.Pastel1 # use a default pastel colormap from mpl
+                 norm = plt.Normalize(vmin=min(original_labels) if len(lines) > 0 else 0, vmax=max(original_labels) if len(lines) > 0 else 0)
+                 facecolor = cmap(norm(i))
+
+
+            legend_elements.append(plt.Line2D([0], [0], marker=marker,linestyle='', color='w',  # No visible line for legend
+                                       label=label_text,
+                  	                   markerfacecolor=facecolor,
+                    	               markersize=8))
+
+
+
         plt.legend(handles=legend_elements, loc="best")
 
         for i, line in enumerate(lines):
@@ -210,6 +199,7 @@ class LyricsAnalyzer:
 
         plt.savefig(f"lyric_embeddings_{model_name}.png")
         plt.close()
+
 
     def generate_cluster_names(self, labels, lines):
         """Generates names for each cluster based on frequent words."""
@@ -261,36 +251,6 @@ class LyricsAnalyzer:
         sentence_transformer_embeddings = normalize(np.array(sentence_transformer_embeddings))
 
         # ---------------------------
-        # DBSCAN Clustering
-        # ---------------------------
-        print("DistilBERT Clustering with DBSCAN:")
-        distilbert_labels_dbscan, distilbert_params_dbscan, distilbert_score_dbscan = self.tune_clustering(distilbert_embeddings, lines, "DBSCAN")
-        
-        print("\nSentenceTransformer Clustering with DBSCAN:")
-        sentence_transformer_labels_dbscan, sentence_transformer_params_dbscan, sentence_transformer_score_dbscan = self.tune_clustering(sentence_transformer_embeddings, lines, "DBSCAN")
-        
-        # Print and visualize DBSCAN results.
-        self.cluster_lyrics(distilbert_embeddings, lines, "DistilBERT DBSCAN", distilbert_labels_dbscan)
-        self.visualize_embeddings(distilbert_embeddings, lines, "DistilBERT DBSCAN", distilbert_labels_dbscan)
-        self.cluster_lyrics(sentence_transformer_embeddings, lines, "SentenceTransformer DBSCAN", sentence_transformer_labels_dbscan)
-        self.visualize_embeddings(sentence_transformer_embeddings, lines, "SentenceTransformer DBSCAN", sentence_transformer_labels_dbscan)
-
-        # ---------------------------
-        # HDBSCAN Clustering
-        # ---------------------------
-        print("\nDistilBERT Clustering with HDBSCAN:")
-        distilbert_labels_hdbscan, distilbert_params_hdbscan, distilbert_score_hdbscan = self.tune_clustering(distilbert_embeddings, lines, "HDBSCAN")
-        
-        print("\nSentenceTransformer Clustering with HDBSCAN:")
-        sentence_transformer_labels_hdbscan, sentence_transformer_params_hdbscan, sentence_transformer_score_hdbscan = self.tune_clustering(sentence_transformer_embeddings, lines, "HDBSCAN")
-        
-        # Print and visualize HDBSCAN results.
-        self.cluster_lyrics(distilbert_embeddings, lines, "DistilBERT HDBSCAN", distilbert_labels_hdbscan)
-        self.visualize_embeddings(distilbert_embeddings, lines, "DistilBERT HDBSCAN", distilbert_labels_hdbscan)
-        self.cluster_lyrics(sentence_transformer_embeddings, lines, "SentenceTransformer HDBSCAN", sentence_transformer_labels_hdbscan)
-        self.visualize_embeddings(sentence_transformer_embeddings, lines, "SentenceTransformer HDBSCAN", sentence_transformer_labels_hdbscan)
-
-        # ---------------------------
         # OPTICS Clustering
         # ---------------------------
         print("\nDistilBERT Clustering with OPTICS:")
@@ -309,23 +269,101 @@ class LyricsAnalyzer:
         # Ranking Clustering Results
         # ---------------------------
         # Combine silhouette scores from all methods.
-        all_rankings = {
-            "DistilBERT_DBSCAN": distilbert_score_dbscan,
-            "SentenceTransformer_DBSCAN": sentence_transformer_score_dbscan,
-            "DistilBERT_HDBSCAN": distilbert_score_hdbscan,
-            "SentenceTransformer_HDBSCAN": sentence_transformer_score_hdbscan,
-            "DistilBERT_OPTICS": distilbert_score_optics,
-            "SentenceTransformer_OPTICS": sentence_transformer_score_optics,
+        all_results = {
+            "DistilBERT_OPTICS": (distilbert_labels_optics, distilbert_embeddings, distilbert_score_optics),
+            "SentenceTransformer_OPTICS": (sentence_transformer_labels_optics, sentence_transformer_embeddings, sentence_transformer_score_optics),
         }
-        sorted_rankings = sorted(all_rankings.items(), key=lambda item: item[1], reverse=True)
+
+        sorted_rankings = sorted(all_results.items(), key=lambda item: item[1][2], reverse=True)
         print("\nClustering Rankings (by Silhouette Score):")
-        for method, score in sorted_rankings:
+        for method, (labels, embeddings, score) in sorted_rankings:
             print(f"{method}: {score}")
 
-        # Optionally, compute additional ranking metrics for DBSCAN as an example.
-        rank_metrics_distilbert = self.rank_clusterings(distilbert_embeddings, lines, distilbert_labels_dbscan)
-        rank_metrics_sentence = self.rank_clusterings(sentence_transformer_embeddings, lines, sentence_transformer_labels_dbscan)
-        print("\nAdditional Ranking Metrics (using DBSCAN results):")
-        print(f"DistilBERT DBSCAN: {rank_metrics_distilbert}")
-        print(f"SentenceTransformer DBSCAN: {rank_metrics_sentence}")
+        # Perform nested clustering if applicable
+        best_method, (best_labels, best_embeddings, best_score) = sorted_rankings[0]
+        self.perform_nested_clustering(best_embeddings, lines, best_labels,best_method)
 
+        # Optionally, compute additional ranking metrics for DBSCAN as an example.
+        rank_metrics_distilbert = self.rank_clusterings(distilbert_embeddings, lines, distilbert_labels_optics)
+        rank_metrics_sentence = self.rank_clusterings(sentence_transformer_embeddings, lines, sentence_transformer_labels_optics)
+        print("\nAdditional Ranking Metrics (using OPTICS results):")
+        print(f"DistilBERT OPTICS: {rank_metrics_distilbert}")
+        print(f"SentenceTransformer OPTICS: {rank_metrics_sentence}")
+
+    def perform_nested_clustering(self, embeddings, lines, labels, parent_model_name):
+        """
+        Performs nested clustering within the largest cluster if it meets the size criteria.
+        """
+        cluster_sizes = {label: np.sum(labels == label) for label in np.unique(labels)}
+        if len(cluster_sizes) <= 1:
+            print('No clusters found for nest')
+            return
+
+        # Remove noise cluster from consideration for size comparison
+        if -1 in cluster_sizes:
+            del cluster_sizes[-1]
+
+        largest_cluster_id = max(cluster_sizes, key=cluster_sizes.get)
+        largest_cluster_size = cluster_sizes[largest_cluster_id]
+
+        # Find the size of the second largest cluster.
+        sorted_sizes = sorted(cluster_sizes.values(), reverse=True)
+        second_largest_size = sorted_sizes[1] if len(
+            sorted_sizes) > 1 else 0  # Handle case where there's only one cluster
+
+        # Calculate the percentage difference in size.
+        if second_largest_size > 0:
+            size_difference_percentage = (
+                                                largest_cluster_size - second_largest_size) / second_largest_size * 100
+        else:
+            size_difference_percentage = float('inf')  # or a large number if no other clusters exist
+
+        print(f"Largest cluster size: {largest_cluster_size}")
+        print(f"Second largest cluster size: {second_largest_size}")
+        print(f"Size difference percentage: {size_difference_percentage:.2f}%")
+
+        #Store the original cluster labels for visualization
+        original_labels = labels[:]
+
+        # Check if the largest cluster meets the criteria for nested clustering.
+        if size_difference_percentage >= SIZE_DIFFERENCE_THRESHOLD:
+            print(f"Performing nested clustering on cluster {largest_cluster_id}...")
+
+            # Extract embeddings and lines from the largest cluster.
+            largest_cluster_indices = [i for i, label in enumerate(labels) if label == largest_cluster_id]
+            largest_cluster_embeddings = embeddings[largest_cluster_indices]
+            largest_cluster_lines = [lines[i] for i in largest_cluster_indices]
+
+            # Perform nested clustering (e.g., using OPTICS). Modify params as needed.
+            nested_labels, nested_params, nested_score = self.tune_clustering(largest_cluster_embeddings, largest_cluster_lines, "OPTICS")
+
+            if nested_labels is None: #Add this check
+                print("Nested clustering failed to produce labels. Skipping further processing.") #inform
+                return #exit
+
+            # Adjust nested cluster labels to be unique within the overall clustering.
+            nested_labels_adjusted = [
+                f"{largest_cluster_id}_{label}" if label != -1 else str(label) for label in nested_labels]
+
+            # Adjust all labels so changes are to all labels, not a subset
+            all_labels_adjusted = labels[:]
+
+            # Correctly update nested labels in the main labels array if nested_labels are found and non-empty
+            if nested_labels is not None and len(nested_labels) > 0:
+                for i, original_index in enumerate(largest_cluster_indices):
+                    all_labels_adjusted[original_index] = nested_labels_adjusted[i]
+
+                #Visualize it all together. Now using the correct all_labels_adjusted
+                self.visualize_embeddings(embeddings, lines,
+                                              f"{parent_model_name}_Nested_Combined_{largest_cluster_id}",
+                                              all_labels_adjusted , original_labels=original_labels) #Pass original labels
+
+
+                self.cluster_lyrics(embeddings, lines,
+                                    f"{parent_model_name}_Nested__Combined_{largest_cluster_id}",
+                                    all_labels_adjusted)
+            else:
+                   print("No nested clusters found, skipping visualization")
+                   #Output file and name
+        else:
+           print("Largest cluster does not meet the size criteria for nested clustering.")
