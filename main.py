@@ -3,23 +3,23 @@ import threading
 import time
 import asyncio
 from src.info.song_info import SongInfo
-from src.analyzer.lyrics_analyzer import LyricsAnalyzer
+from src.analyzer.llm_analysis import LLMAnalysis
 
-async def analyze_lyrics_async(lyrics, lyrics_analyzer):
+async def analyze_lyrics_async(lyrics: str):
     """
-    Runs lyrics analysis asynchronously.
+    Asynchronously analyzes the lyrics using LLMAnalysis.
     """
-    loop = asyncio.get_event_loop()  
-    await loop.run_in_executor(None, lyrics_analyzer.analyze_fused_lyrics, lyrics) 
+    llm_analysis = LLMAnalysis()
+    analysis_result = await asyncio.to_thread(llm_analysis.analyze_lyrics, lyrics)  # Run sync function in separate thread
+    return analysis_result
+
 
 def main():
     song_info = SongInfo(headless=True)
-    lyrics_analyzer = LyricsAnalyzer()
-
     song_info.load_site()
     stop_event = threading.Event()
 
-    def monitor_song_title():
+    async def monitor_song_title():
         while not stop_event.is_set():
             updated_title = song_info.update_song_title()
             if updated_title is not None:
@@ -27,13 +27,22 @@ def main():
                 print("-" * 40)
                 time.sleep(1)
                 lyrics = song_info.get_fullscreen_lyrics()
-                print(lyrics)
+                # print(lyrics)
                 print("-" * 40)
-                asyncio.run(analyze_lyrics_async(lyrics, lyrics_analyzer))
-
+                
+                # Asynchronously analyze the lyrics
+                analysis_result = await analyze_lyrics_async(lyrics)
+                if analysis_result:
+                    print("Lyrics Analysis:")
+                    print(analysis_result)
+                else:
+                    print("Lyrics analysis failed or returned empty result.")
             time.sleep(2)
 
-    monitor_thread = threading.Thread(target=monitor_song_title)
+    async def run_monitor():
+        await monitor_song_title()
+
+    monitor_thread = threading.Thread(target=lambda: asyncio.run(run_monitor()))
     monitor_thread.start()
 
     input("Press Enter to exit and close the browser...")
