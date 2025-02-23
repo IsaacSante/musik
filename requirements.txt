@@ -3,7 +3,8 @@ torch
 scikit-learn
 matplotlib
 selenium
-asyncio
 sentence-transformers
-hdbscan
 nltk
+numpy
+python-dotenv
+google-generativeai
