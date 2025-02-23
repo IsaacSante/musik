@@ -3,7 +3,6 @@ import json
 import os
 from dotenv import load_dotenv
 import re
-
 load_dotenv()
 
 def remove_markdown_fences(text):
@@ -30,25 +29,25 @@ class LLMAnalysis:
         prompt = (
             "Analyze the following lyrics line by line and list the key concept(s) or themes present "
             "in each line and the subject being addressed.\n\n"
-            "Data Format: Organize the output into a JSON object. For example:\n\n"
-            "{\n"
-            "  \"line1\": {\n"
+            "Data Format: Organize the output into a JSON array, where each element is an object representing a line of the lyrics. For example:\n\n"
+            "[\n"
+            "  {\n"
             "    \"text\": \"first lyric\",\n"
             "    \"concepts\": [\"concept 1\", \"concept 2\"],\n"
             "    \"subject\": [\"subject 1\", \"subject 2\"]\n"
             "  },\n"
-            "  \"line2\": {\n"
+            "  {\n"
             "    \"text\": \"second lyric\",\n"
             "    \"concepts\": [\"concept 1\", \"concept 2\", \"concept 3\"],\n"
             "    \"subject\": [\"subject 1\"]\n"
             "  },\n"
-            "  \"line3\": {\n"
+            "  {\n"
             "    \"text\": \"third lyric\",\n"
             "    \"concepts\": [\"concept 1\", \"concept 2\", \"concept 3\"],\n"
             "    \"subject\": [\"subject 1\", \"subject 2\"]\n"
             "  }\n"
             "  // ... additional lines\n"
-            "}\n\n"
+            "]\n\n"
             "Song Lyrics:\n"
             f"{cleaned_lyrics}"
         )
