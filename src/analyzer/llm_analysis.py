@@ -4,12 +4,69 @@ import os
 from dotenv import load_dotenv
 import re
 load_dotenv()
+import asyncio
 
 def remove_markdown_fences(text):
     # Remove the starting ```json or ``` and the ending ```
     text = re.sub(r"^```(?:json)?\s*", "", text)
     text = re.sub(r"\s*```$", "", text)
     return text
+
+
+def parse_and_print_objects(chunk_stream):
+    """
+    Processes a stream of chunks, filters them with remove_markdown_fences,
+    detects complete JSON objects, prints them, and returns a list of parsed objects.
+    """
+    buffer = ""
+    brace_count = 0
+    in_string = False
+    escape = False
+    obj_start = None
+    results = []
+    
+    for chunk in chunk_stream:
+        # Filter the chunk text using remove_markdown_fences
+        filtered_text = remove_markdown_fences(chunk.text)
+        for char in filtered_text:
+            # Skip array markers if not currently inside an object
+            if char in ['[', ']'] and brace_count == 0:
+                continue
+
+            buffer += char
+
+            # Toggle in_string when encountering a non-escaped quote
+            if char == '"' and not escape:
+                in_string = not in_string
+
+            if not in_string:
+                if char == '{':
+                    if brace_count == 0:
+                        # Mark the beginning of a new JSON object.
+                        obj_start = len(buffer) - 1
+                    brace_count += 1
+                elif char == '}':
+                    brace_count -= 1
+                    if brace_count == 0 and obj_start is not None:
+                        # Extract the complete JSON object
+                        obj_text = buffer[obj_start:]
+                        try:
+                            obj = json.loads(obj_text)
+                            print("Analyzed Lyric:", obj)
+                            results.append(obj)
+                        except json.JSONDecodeError as e:
+                            print(f"Error decoding JSON: {e}")
+                        # Reset the buffer after processing a complete object.
+                        buffer = ""
+                        obj_start = None
+
+            # Handle escape characters inside strings.
+            if char == '\\' and in_string:
+                escape = True
+            else:
+                escape = False
+
+    return results
 
 class LLMAnalysis:
     def __init__(self, model_name: str = "gemini-2.0-flash-lite-preview-02-05"):
@@ -55,29 +112,22 @@ class LLMAnalysis:
 
     def analyze_lyrics(self, cleaned_lyrics: str):
         try:
+            # Ensure there is an event loop in the current thread
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+
             self._initialize_client()
             prompt = self.generate_prompt(cleaned_lyrics)
-            # Use the streaming method
             response_stream = self.client.models.generate_content_stream(
                 model=self.model_name,
                 contents=[prompt]
             )
 
-            json_buffer = ""
-            for chunk in response_stream:
-                clean_chunk = remove_markdown_fences(chunk.text)
-                print(clean_chunk, end="", flush=True)
-                json_buffer += chunk.text
-
-            
-            clean_json = remove_markdown_fences(json_buffer)
-            try:
-                analysis_result = json.loads(clean_json)
-                return analysis_result
-
-            except json.JSONDecodeError as e:
-                print(f"\nError decoding JSON after streaming: {e}. Full Response: {json_buffer}")
-                return {}
+            analysis_results = parse_and_print_objects(response_stream)
+            return analysis_results
         except Exception as e:
             print(f"\nAn error occurred during analysis: {e}")
             return {}
