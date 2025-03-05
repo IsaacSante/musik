@@ -3,70 +3,9 @@ import json
 import os
 from dotenv import load_dotenv
 import re
-load_dotenv()
+import time
 import asyncio
-
-def remove_markdown_fences(text):
-    # Remove the starting ```json or ``` and the ending ```
-    text = re.sub(r"^```(?:json)?\s*", "", text)
-    text = re.sub(r"\s*```$", "", text)
-    return text
-
-
-def parse_and_print_objects(chunk_stream):
-    """
-    Processes a stream of chunks, filters them with remove_markdown_fences,
-    detects complete JSON objects, prints them, and returns a list of parsed objects.
-    """
-    buffer = ""
-    brace_count = 0
-    in_string = False
-    escape = False
-    obj_start = None
-    results = []
-    
-    for chunk in chunk_stream:
-        # Filter the chunk text using remove_markdown_fences
-        filtered_text = remove_markdown_fences(chunk.text)
-        for char in filtered_text:
-            # Skip array markers if not currently inside an object
-            if char in ['[', ']'] and brace_count == 0:
-                continue
-
-            buffer += char
-
-            # Toggle in_string when encountering a non-escaped quote
-            if char == '"' and not escape:
-                in_string = not in_string
-
-            if not in_string:
-                if char == '{':
-                    if brace_count == 0:
-                        # Mark the beginning of a new JSON object.
-                        obj_start = len(buffer) - 1
-                    brace_count += 1
-                elif char == '}':
-                    brace_count -= 1
-                    if brace_count == 0 and obj_start is not None:
-                        # Extract the complete JSON object
-                        obj_text = buffer[obj_start:]
-                        try:
-                            obj = json.loads(obj_text)
-                            print("Analyzed Lyric:", obj)
-                            results.append(obj)
-                        except json.JSONDecodeError as e:
-                            print(f"Error decoding JSON: {e}")
-                        # Reset the buffer after processing a complete object.
-                        buffer = ""
-                        obj_start = None
-
-            # Handle escape characters inside strings.
-            if char == '\\' and in_string:
-                escape = True
-            else:
-                escape = False
-
-    return results
+load_dotenv()
 
 class LLMAnalysis:
     def __init__(self, model_name: str = "gemini-2.0-flash-lite-preview-02-05"):
@@ -84,31 +23,79 @@ class LLMAnalysis:
 
     def generate_prompt(self, cleaned_lyrics: str) -> str:
         prompt = (
-            "Analyze the following lyrics line by line and list the key concept(s) or themes present "
-            "in each line and the subject being addressed.\n\n"
-            "Data Format: Organize the output into a JSON array, where each element is an object representing a line of the lyrics. For example:\n\n"
-            "[\n"
-            "  {\n"
-            "    \"text\": \"first lyric\",\n"
-            "    \"concepts\": [\"concept 1\", \"concept 2\"],\n"
-            "    \"subject\": [\"subject 1\", \"subject 2\"]\n"
-            "  },\n"
-            "  {\n"
-            "    \"text\": \"second lyric\",\n"
-            "    \"concepts\": [\"concept 1\", \"concept 2\", \"concept 3\"],\n"
-            "    \"subject\": [\"subject 1\"]\n"
-            "  },\n"
-            "  {\n"
-            "    \"text\": \"third lyric\",\n"
-            "    \"concepts\": [\"concept 1\", \"concept 2\", \"concept 3\"],\n"
-            "    \"subject\": [\"subject 1\", \"subject 2\"]\n"
-            "  }\n"
-            "  // ... additional lines\n"
-            "]\n\n"
+            "Analyze these lyrics line by line. For each line, output in this exact format:\n\n"
+            "LINE: [the lyric text]\n"
+            "THEMES: [comma-separated list of key concepts/themes]\n"
+            "WHO: [comma-separated list of subjects addressed]\n"
+            "<<END>>\n\n"
+            "Use the <<END>> marker after each line analysis. Keep themes and subjects brief (1-3 words each).\n\n"
             "Song Lyrics:\n"
             f"{cleaned_lyrics}"
         )
         return prompt
+
+    def parse_section(self, section_text):
+        """Parse a single section of lyric analysis with the simplified format."""
+        section = section_text.strip()
+        if not section:
+            return None
+            
+        result = {}
+        lines = section.split('\n')
+        
+        for line in lines:
+            line = line.strip()
+            if line.startswith('LINE:'):
+                result['text'] = line[5:].strip()
+            elif line.startswith('THEMES:'):
+                result['concepts'] = [c.strip() for c in line[7:].strip().split(',')]
+            elif line.startswith('WHO:'):
+                result['subject'] = [s.strip() for s in line[4:].strip().split(',')]
+        
+        # Only return non-empty items that have text
+        if result and 'text' in result:
+            return result
+        return None
+
+    def process_stream_chunks(self, chunk_stream):
+        """
+        Process streaming chunks and extract complete lyric analysis sections 
+        separated by the <<END>> delimiter in real-time.
+        """
+        buffer = ""
+        results = []
+        first_chunk_received = False
+        start_time = time.time()
+        
+        for chunk in chunk_stream:
+            if not first_chunk_received:
+                first_chunk_received = True
+                elapsed = time.time() - start_time
+                print(f"{elapsed:.2f} seconds till first chunk")
+                
+            buffer += chunk.text
+            
+            # Check if we have complete sections (marked by <<END>>)
+            while "<<END>>" in buffer:
+                parts = buffer.split("<<END>>", 1)
+                section = parts[0].strip()
+                buffer = parts[1]
+                
+                # Parse the complete section
+                if section:
+                    result = self.parse_section(section)
+                    if result:
+                        print("Analyzed Lyric:", result)
+                        results.append(result)
+        
+        # Process any remaining content in the buffer
+        if buffer.strip():
+            result = self.parse_section(buffer.strip())
+            if result:
+                print("Analyzed Lyric:", result)
+                results.append(result)
+                
+        return results
 
     def analyze_lyrics(self, cleaned_lyrics: str):
         try:
@@ -121,13 +108,25 @@ class LLMAnalysis:
 
             self._initialize_client()
             prompt = self.generate_prompt(cleaned_lyrics)
+            
+            # Record start time before sending prompt
+            start_time = time.time()
+            print("Sending prompt to model...")
+            
+            # Use streaming version
             response_stream = self.client.models.generate_content_stream(
                 model=self.model_name,
                 contents=[prompt]
             )
-
-            analysis_results = parse_and_print_objects(response_stream)
+            
+            # Process the streaming response and parse sections in real-time
+            # We pass start_time implicitly by capturing it in the closure
+            analysis_results = self.process_stream_chunks(response_stream)
+            
+            total_elapsed = time.time() - start_time
+            print(f"Analysis completed in {total_elapsed:.2f} seconds")
+            
             return analysis_results
         except Exception as e:
             print(f"\nAn error occurred during analysis: {e}")
-            return {}
+            return []
