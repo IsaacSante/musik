@@ -5,6 +5,7 @@ __pycache__/
 *$py.class
 *.png
 chromedriver
+*.txt
 
 # Virtual environment
 venv/

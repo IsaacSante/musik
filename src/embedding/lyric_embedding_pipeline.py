@@ -420,6 +420,7 @@ class LyricEmbeddingPipeline:
         # Save cluster summary if we have at least 3 lyrics (changed from 5)
         if len(self.text_labels) >= 3:
             self._create_cluster_summary()
+            self._create_text_summary()
         
         print(f"Updated visualization saved to '{output_path}'")
     
@@ -825,6 +826,171 @@ class LyricEmbeddingPipeline:
             result.append((text, concepts, subjects, cluster))
         
         return result
+    
+    def _create_text_summary(self):
+        """Generate a text file with a written overview of lyrics and clusters."""
+        if self.cluster_labels is None or len(self.text_labels) < 2:
+            return
+            
+        # Prepare the output file path
+        output_path = os.path.join(self.output_dir, 'lyric_analysis_summary.txt')
+        
+        with open(output_path, 'w') as f:
+            # Write header
+            f.write("LYRIC ANALYSIS SUMMARY\n")
+            f.write("=====================\n\n")
+            
+            # Overall statistics
+            unique_labels = sorted(set(self.cluster_labels))
+            n_clusters = len(unique_labels) - (1 if -1 in unique_labels else 0)
+            
+            f.write(f"Total lyrics analyzed: {len(self.text_labels)}\n")
+            f.write(f"Number of clusters identified: {n_clusters}\n")
+            f.write(f"Embedding model: {self.model.__class__.__name__}\n")
+            f.write(f"Clustering method: {self.clustering_method.upper()}\n")
+            f.write(f"Dimensionality reduction: {self.dim_reduction.upper()}\n\n")
+            
+            # Get all concepts and subjects
+            all_concepts = [concept for concepts in self.concepts_data for concept in concepts]
+            all_subjects = [subject for subjects in self.subjects_data for subject in subjects]
+            
+            # Count and sort by frequency
+            concept_counts = {}
+            for concept in all_concepts:
+                concept_counts[concept] = concept_counts.get(concept, 0) + 1
+                
+            subject_counts = {}
+            for subject in all_subjects:
+                subject_counts[subject] = subject_counts.get(subject, 0) + 1
+            
+            # Get top overall concepts and subjects
+            top_concepts = sorted(concept_counts.items(), key=lambda x: x[1], reverse=True)[:10]
+            top_subjects = sorted(subject_counts.items(), key=lambda x: x[1], reverse=True)[:10]
+            
+            # Write overall themes section
+            f.write("OVERALL THEMES\n")
+            f.write("--------------\n")
+            f.write("Top concepts across all lyrics:\n")
+            for concept, count in top_concepts:
+                f.write(f"  - {concept}: {count} occurrences\n")
+            
+            f.write("\nTop subjects across all lyrics:\n")
+            for subject, count in top_subjects:
+                f.write(f"  - {subject}: {count} occurrences\n")
+            
+            f.write("\n\nCLUSTER ANALYSIS\n")
+            f.write("----------------\n")
+            
+            # Handle unclustered/noise points if they exist
+            if -1 in unique_labels:
+                noise_indices = np.where(self.cluster_labels == -1)[0]
+                f.write(f"\nUNCLUSTERED LYRICS: {len(noise_indices)} lyrics\n")
+                
+                # Write a few examples of unclustered lyrics
+                if noise_indices.size > 0:
+                    f.write("Examples of unclustered lyrics:\n")
+                    for idx in noise_indices[:min(3, len(noise_indices))]:
+                        f.write(f"  • \"{self.text_labels[idx][:50]}{'...' if len(self.text_labels[idx]) > 50 else ''}\"\n")
+                        f.write(f"    Concepts: {', '.join(self.concepts_data[idx][:3])}\n")
+                        
+                    f.write("\n")
+            
+            # For each proper cluster
+            for cluster_id in [c for c in unique_labels if c != -1]:
+                cluster_indices = np.where(self.cluster_labels == cluster_id)[0]
+                
+                # Skip empty clusters
+                if len(cluster_indices) == 0:
+                    continue
+                    
+                f.write(f"\nCLUSTER {cluster_id+1}: {len(cluster_indices)} lyrics\n")
+                
+                # Get cluster-specific concepts and subjects
+                cluster_concepts = [concept for idx in cluster_indices for concept in self.concepts_data[idx]]
+                cluster_subjects = [subject for idx in cluster_indices for subject in self.subjects_data[idx]]
+                
+                # Count frequencies
+                concept_counts = {}
+                for concept in cluster_concepts:
+                    concept_counts[concept] = concept_counts.get(concept, 0) + 1
+                    
+                subject_counts = {}
+                for subject in cluster_subjects:
+                    subject_counts[subject] = subject_counts.get(subject, 0) + 1
+                
+                # Get top concepts and subjects for this cluster
+                top_cluster_concepts = sorted(concept_counts.items(), key=lambda x: x[1], reverse=True)[:5]
+                top_cluster_subjects = sorted(subject_counts.items(), key=lambda x: x[1], reverse=True)[:5]
+                
+                # Write common themes
+                f.write("Common themes in this cluster:\n")
+                f.write("  Concepts: " + ", ".join([f"{c} ({n})" for c, n in top_cluster_concepts]) + "\n")
+                f.write("  Subjects: " + ", ".join([f"{s} ({n})" for s, n in top_cluster_subjects]) + "\n")
+                
+                # Write representative lyrics
+                f.write("\nRepresentative lyrics from this cluster:\n")
+                
+                # First find the most central lyric (closest to centroid)
+                if self.embedding_2d is not None and len(cluster_indices) > 1:
+                    cluster_embeddings = self.embedding_2d[cluster_indices]
+                    centroid = np.mean(cluster_embeddings, axis=0)
+                    distances = np.linalg.norm(cluster_embeddings - centroid, axis=1)
+                    central_idx = cluster_indices[np.argmin(distances)]
+                    
+                    f.write(f"  Central example: \"{self.text_labels[central_idx][:75]}{'...' if len(self.text_labels[central_idx]) > 75 else ''}\"\n")
+                    f.write(f"    Concepts: {', '.join(self.concepts_data[central_idx][:3])}\n\n")
+                
+                # Add a few more examples
+                sample_size = min(3, len(cluster_indices))
+                if len(cluster_indices) > 1:  # Avoid resampling if we only have one lyric
+                    # Try to avoid reusing the central example by removing it from the sampling pool
+                    available_indices = list(cluster_indices)
+                    if self.embedding_2d is not None and 'central_idx' in locals():
+                        if central_idx in available_indices:
+                            available_indices.remove(central_idx)
+                    
+                    # Sample additional examples
+                    if available_indices:
+                        sample_indices = np.random.choice(available_indices, 
+                                                        size=min(sample_size, len(available_indices)), 
+                                                        replace=False)
+                        
+                        for i, idx in enumerate(sample_indices):
+                            f.write(f"  Example {i+1}: \"{self.text_labels[idx][:75]}{'...' if len(self.text_labels[idx]) > 75 else ''}\"\n")
+                            f.write(f"    Concepts: {', '.join(self.concepts_data[idx][:3])}\n")
+                
+                f.write("\n")
+            
+            # Add a recommendations section
+            f.write("\nINSIGHTS AND OBSERVATIONS\n")
+            f.write("------------------------\n")
+            
+            # Generate some insights based on the clusters
+            if n_clusters == 0:
+                f.write("No clear clusters were identified. This could indicate that the lyrics are highly diverse,\n")
+                f.write("or that a different clustering approach might be needed to find patterns.\n")
+            elif n_clusters == 1:
+                f.write("All lyrics were grouped into a single cluster, suggesting strong thematic coherence.\n")
+                f.write("The lyrics appear to revolve around similar concepts and subjects.\n")
+            elif 1 < n_clusters <= 3:
+                f.write(f"The lyrics naturally grouped into {n_clusters} distinct clusters.\n")
+                f.write("Each cluster represents a different thematic direction or mood in the lyrics.\n")
+            else:
+                f.write(f"The lyrics show significant diversity, forming {n_clusters} distinct clusters.\n")
+                f.write("This indicates a wide range of themes and subjects across the collection.\n")
+            
+            # Look for very small clusters
+            small_clusters = [c for c in unique_labels if c != -1 and np.sum(self.cluster_labels == c) <= 2]
+            if small_clusters:
+                f.write(f"\nNote: There are {len(small_clusters)} very small clusters with only 1-2 lyrics each.\n")
+                f.write("These may represent outliers or unique thematic directions.\n")
+            
+            # Close with timestamp
+            from datetime import datetime
+            f.write(f"\n\nAnalysis generated on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        
+        print(f"Text summary of lyric analysis saved to '{output_path}'")
+
         
     def clear_data(self):
         """Clear all data to start fresh."""
