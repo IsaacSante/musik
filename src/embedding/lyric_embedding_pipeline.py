@@ -16,6 +16,7 @@ from difflib import SequenceMatcher
 from tqdm import tqdm
 matplotlib.use('Agg')  # Use non-interactive backend for server environments
 from typing import Dict, List, Set, Optional
+import torch
 
 class LyricEmbeddingPipeline:
     def __init__(self, 
@@ -32,8 +33,13 @@ class LyricEmbeddingPipeline:
             dim_reduction (str): Dimensionality reduction method ('pca', 'tsne', or 'umap')
             max_display_lyrics (int): Maximum number of lyrics to display on the detailed plot
         """
+        # Set up torch device to use Apple MPS if available
+        self.device = torch.device("mps") if torch.backends.mps.is_available() else torch.device("cpu")
+        print(f"Using device: {self.device}")
+
         # Initialize embedding model
-        self.model = SentenceTransformer(model_name)
+        self.model = SentenceTransformer(model_name, device=str(self.device))
+
         
         # Choose clustering algorithm
         self.clustering_method = clustering_method.lower()
