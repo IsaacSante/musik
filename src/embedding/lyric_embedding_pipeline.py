@@ -18,6 +18,8 @@ matplotlib.use('Agg')  # Use non-interactive backend for server environments
 from typing import Dict, List, Set, Optional
 import torch
 
+from src.analyzer.cluster_analyzer import ClusterImagePromptGenerator
+
 class LyricEmbeddingPipeline:
     def __init__(self, 
                  model_name='all-MiniLM-L6-v2', 
@@ -33,6 +35,10 @@ class LyricEmbeddingPipeline:
             dim_reduction (str): Dimensionality reduction method ('pca', 'tsne', or 'umap')
             max_display_lyrics (int): Maximum number of lyrics to display on the detailed plot
         """
+
+        self.prompt_generator = ClusterImagePromptGenerator()
+        self.processed_clusters = set()  # Track which clusters we've processed
+        print("Initialized ClusterImagePromptGenerator")
         # Set up torch device to use Apple MPS if available
         self.device = torch.device("mps") if torch.backends.mps.is_available() else torch.device("cpu")
         print(f"Using device: {self.device}")
@@ -287,6 +293,11 @@ class LyricEmbeddingPipeline:
             unique_labels = set(self.cluster_labels)
             n_clusters = len(unique_labels) - (1 if -1 in self.cluster_labels else 0)
             print(f"Updated clustering: {n_clusters} clusters found among {len(self.text_labels)} lyrics")
+
+        # Add to the end of your existing _update_clustering method
+        if hasattr(self, 'prompt_generator') and self.prompt_generator is not None:
+            self._process_stable_clusters()
+
     
     def _visualize_embeddings(self):
         """
@@ -997,7 +1008,98 @@ class LyricEmbeddingPipeline:
         
         print(f"Text summary of lyric analysis saved to '{output_path}'")
 
+
+    def set_prompt_generator(self, prompt_generator):
+        """Connect a prompt generator to this pipeline."""
+        self.prompt_generator = prompt_generator
+        self.processed_clusters = set()  # Track which clusters we've processed
+        print("Connected prompt generator to embedding pipeline")
+
+    def _process_stable_clusters(self):
+        """Generate image prompts for stable clusters."""
+        if self.cluster_labels is None:
+            return
+            
+        # Find all clusters with at least 3 lyrics
+        unique_labels = set(self.cluster_labels)
         
+        for cluster_id in unique_labels:
+            # Skip noise points and already processed clusters
+            if cluster_id == -1 or cluster_id in self.processed_clusters:
+                continue
+                
+            # Get indices of lyrics in this cluster
+            cluster_indices = np.where(self.cluster_labels == cluster_id)[0]
+            
+            # Only process clusters with at least 3 lyrics
+            if len(cluster_indices) >= 3:
+                try:
+                    # Collect cluster data
+                    cluster_data = self._get_cluster_data(cluster_id, cluster_indices)
+                    
+                    # Generate prompts for this cluster
+                    prompts = self.prompt_generator.generate_prompts_for_cluster(
+                        cluster_id, cluster_data
+                    )
+                    
+                    if prompts:
+                        print(f"Generated {len(prompts)} image prompts for cluster {cluster_id}")
+                        for i, prompt in enumerate(prompts):
+                            print(f"  Prompt {i+1}: {prompt[:75]}...")
+                        
+                        # Use the lock when updating shared data
+                        with self.lock:
+                            self.processed_clusters.add(cluster_id)
+                except Exception as e:
+                    print(f"Error processing cluster {cluster_id}: {e}")
+                    import traceback
+                    traceback.print_exc()  # Print stack trace for debugging
+
+
+    def _get_cluster_data(self, cluster_id, cluster_indices):
+        """Collect all data for a specific cluster."""
+        # Get all lyrics in this cluster
+        lyrics = [self.text_labels[i] for i in cluster_indices]
+        
+        # Get all concepts and subjects
+        all_concepts = []
+        all_subjects = []
+        
+        for idx in cluster_indices:
+            all_concepts.extend(self.concepts_data[idx])
+            all_subjects.extend(self.subjects_data[idx])
+        
+        return {
+            'cluster_id': cluster_id,
+            'lyrics': lyrics,
+            'concepts': all_concepts,
+            'subjects': all_subjects,
+            'size': len(cluster_indices)
+        }
+
+    def get_prompt_for_lyric(self, lyric_text):
+        """Get an image prompt for a specific lyric."""
+        try:
+            # Find if lyric is in our dataset
+            lyric_index = None
+            for i, text in enumerate(self.text_labels):
+                if text == lyric_text:
+                    lyric_index = i
+                    break
+            
+            # If found, get its cluster
+            if lyric_index is not None and self.cluster_labels is not None:
+                cluster_id = self.cluster_labels[lyric_index]
+                return self.prompt_generator.get_prompt_for_lyric(lyric_text, cluster_id)
+            
+            # If not found or not in a cluster
+            return self.prompt_generator.get_prompt_for_lyric(lyric_text)
+        except Exception as e:
+            print(f"Error generating prompt for lyric: {e}")
+            return f"A visual representation of: {lyric_text}"  # Fallback
+
+
+
     def clear_data(self):
         """Clear all data to start fresh."""
         self.concepts_data = []
@@ -1007,7 +1109,8 @@ class LyricEmbeddingPipeline:
         self.text_labels = []
         self.all_data = []
         self.text_set = set()
-        # Keep the embedding_cache for efficiency
+        self.processed_clusters = set()  # Reset processed clusters
+        # Keep the embedding_cache and prompt_generator for efficiency
         self.embedding_2d = None
         self.cluster_labels = None
         print("Cleared all lyric data from the pipeline")
