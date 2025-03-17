@@ -34,6 +34,10 @@ class LLMAnalysis:
             "EMOTION: [one-word primary emotion]\n"
             "<<END>>\n\n"
             "Use the <<END>> marker after each line analysis. Return only one word each for SUBJECT, CONCEPT, and EMOTION.\n\n"
+            "Important clustering instructions:\n"
+            "- If many lines share a general theme or subject, introduce subtle nuance by choosing slightly varied SUBJECT, CONCEPT, or EMOTION keywords to distinguish finer shades of meaning within the same overarching topic.\n"
+            "- Balance specificity and generality: avoid overly broad clusters by capturing subtle semantic variations.\n"
+            "- Ensure lyrics that are identical or nearly identical maintain very close semantic tags, while nuanced variations produce slight differences.\n\n"
             "Song Lyrics:\n"
             f"{cleaned_lyrics}"
         )
