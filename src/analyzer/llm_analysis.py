@@ -10,9 +10,10 @@ from queue import Queue
 from threading import Thread
 from src.analyzer.embedding_processor import global_embedding_processor
 
+MODEL = "gemini-2.0-flash-thinking-exp-01-21"
 
 class LLMAnalysis:
-    def __init__(self, model_name: str = "gemini-2.0-flash-lite-preview-02-05"):
+    def __init__(self, model_name: str = MODEL):
         self.api_key = os.environ.get("GOOGLE_API_KEY")
         if self.api_key is None:
             raise ValueError("GOOGLE_API_KEY not found in environment variables.")

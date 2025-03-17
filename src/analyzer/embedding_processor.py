@@ -1,12 +1,14 @@
-from queue import Queue
+from queue import Queue, Empty
 from threading import Thread
 from sentence_transformers import SentenceTransformer
 import torch
 from src.analyzer.embedding_visualizer import EmbeddingVisualizer
+import time
 
 class EmbeddingProcessor:
-    def __init__(self, embedding_model: str = "all-MiniLM-L6-v2"):
+    def __init__(self, embedding_model: str = "all-MiniLM-L6-v2", batch_size: int = 10):
         self.embedding_queue = Queue()
+        self.batch_size = batch_size
         
         # Check for MPS (Metal Performance Shaders) availability
         if torch.backends.mps.is_available():
@@ -26,33 +28,77 @@ class EmbeddingProcessor:
 
     def worker(self):
         while True:
-            lyric_data = self.embedding_queue.get()
-            if lyric_data is None:
-                break
+            # Collect up to batch_size items from the queue
+            batch = []
             
-            lyric_text = lyric_data.get('lyric')
+            # Get the first item (blocking)
+            item = self.embedding_queue.get()
+            if item is None:  # Shutdown signal
+                self.embedding_queue.task_done()
+                break
+                
+            batch.append(item)
+            
+            # Try to get more items up to batch_size (non-blocking)
+            try:
+                for _ in range(self.batch_size - 1):
+                    item = self.embedding_queue.get_nowait()
+                    if item is None:  # Shutdown signal
+                        self.embedding_queue.task_done()
+                        # Process remaining batch items first
+                        break
+                    batch.append(item)
+            except Empty:  # Use the imported Empty exception
+                # Queue is empty, process what we have
+                pass
+                
+            # Process the batch
+            self.process_batch(batch)
+            
+            # Mark all items in the batch as done
+            for _ in range(len(batch)):
+                self.embedding_queue.task_done()
+
+    def process_batch(self, batch):
+        if not batch:
+            return
+            
+        # Extract text for embedding
+        texts = []
+        for lyric_data in batch:
             subject = lyric_data.get('subject', '')
             concept = lyric_data.get('concept', '')
             emotion = lyric_data.get('emotion', '')
-
             combined_text = f"{subject} {concept} {emotion}"
-
-            if combined_text.strip():
-                try:
-                    # Generate embedding using the device-placed model
-                    with torch.no_grad():
-                        embedding = self.model.encode(combined_text)
-                    
-                    result = {
-                        'lyric': lyric_text,
-                        'embedding': embedding,
-                        'combined_text': combined_text,
-                    }
-                    self.embeddings.append(result)
-                    print("Generated embedding:", combined_text)
-                except Exception as e:
-                    print("Error generating embedding:", e)
-            self.embedding_queue.task_done()
+            texts.append(combined_text.strip())
+        
+        # Filter out empty texts
+        valid_indices = [i for i, t in enumerate(texts) if t]
+        valid_texts = [texts[i] for i in valid_indices]
+        valid_lyric_data = [batch[i] for i in valid_indices]
+        
+        if not valid_texts:
+            return
+            
+        try:
+            start_time = time.time()
+            # Generate embeddings for all texts in one call
+            with torch.no_grad():
+                embeddings = self.model.encode(valid_texts)
+            
+            # Add the results to self.embeddings
+            for i, embedding in enumerate(embeddings):
+                result = {
+                    'lyric': valid_lyric_data[i]['lyric'],
+                    'embedding': embedding,
+                    'combined_text': valid_texts[i],
+                }
+                self.embeddings.append(result)
+                
+            end_time = time.time()
+            print(f"Generated {len(valid_texts)} embeddings in batch ({end_time - start_time:.2f}s)")
+        except Exception as e:
+            print(f"Error generating embeddings batch: {e}")
 
     def enqueue(self, lyric_data):
         self.embedding_queue.put(lyric_data)
@@ -76,7 +122,7 @@ class EmbeddingProcessor:
 
 
 # at the bottom of embedding_processor.py
-global_embedding_processor = EmbeddingProcessor()
+global_embedding_processor = EmbeddingProcessor(batch_size=5)
 
 def enqueue_lyric(lyric_data):
     global_embedding_processor.enqueue(lyric_data)
