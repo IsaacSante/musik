@@ -103,18 +103,31 @@ class EmbeddingProcessor:
     def enqueue(self, lyric_data):
         self.embedding_queue.put(lyric_data)
 
-    def shutdown(self, visualize=True, output_file='embeddings.png'):
-        # Shutdown worker
+    def shutdown(self, visualize=True, output_file='embeddings.png', cluster=True, radius=0.5):
         self.embedding_queue.put(None)
         self.worker_thread.join(timeout=2.0)
         print("EmbeddingProcessor worker thread shut down.")
 
+        # Perform clustering if requested
+        if cluster and self.embeddings:
+            from src.analyzer.embedding_cluster_adapter import EmbeddingClusterAdapter
+            cluster_adapter = EmbeddingClusterAdapter(
+                self, 
+                radius=radius, 
+                output_file=output_file.replace('.png', '_clusters.png')
+            )
+            cluster_adapter.start()
+            cluster_adapter.join(timeout=10.0)
+            print("Clustering completed.")
+
         # Trigger visualization if requested
         if visualize:
+            from src.analyzer.embedding_visualizer import EmbeddingVisualizer
             visualizer = EmbeddingVisualizer(self, output_file)
             visualizer.start()
             visualizer.join(timeout=5.0)
             print("Visualization completed.")
+
     
     def clear_embeddings(self):
         self.embeddings.clear()

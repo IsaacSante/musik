@@ -38,7 +38,8 @@ class LLMAnalysis:
             "Important clustering instructions:\n"
             "- If many lines share a general theme or subject, introduce subtle nuance by choosing slightly varied SUBJECT, CONCEPT, or EMOTION keywords to distinguish finer shades of meaning within the same overarching topic.\n"
             "- Balance specificity and generality: avoid overly broad clusters by capturing subtle semantic variations.\n"
-            "- Ensure lyrics that are identical or nearly identical maintain very close semantic tags, while nuanced variations produce slight differences.\n\n"
+            "- Ensure lyrics that are identical or nearly identical maintain very close semantic tags, while nuanced variations produce slight differences.\n"
+            "- If the lyric text is exactly identical to a previous lyric, return the exact same SUBJECT, CONCEPT, and EMOTION as previously provided.\n\n"
             "Song Lyrics:\n"
             f"{cleaned_lyrics}"
         )
@@ -115,7 +116,7 @@ class LLMAnalysis:
                 
         return results
 
-    def analyze_lyrics(self, cleaned_lyrics: str, visualize=True, output_file='embeddings.png'):
+    def analyze_lyrics(self, cleaned_lyrics: str, visualize=True, output_file='embeddings.png', cluster=True, cluster_radius=0.5):
         try:
             # Ensure there is an event loop in the current thread
             try:
@@ -156,6 +157,20 @@ class LLMAnalysis:
                 visualizer.start()
                 visualizer.join()
                 print("Embedding visualization completed.")
+
+            # Only the relevant part:
+            # Perform clustering if requested
+            if cluster and global_embedding_processor.embeddings:
+                from src.analyzer.embedding_cluster_adapter import EmbeddingClusterAdapter
+                cluster_adapter = EmbeddingClusterAdapter(
+                    global_embedding_processor,
+                    radius=cluster_radius,
+                    output_file=output_file.replace('.png', '_clusters.png')
+                )
+                cluster_adapter.start()
+                cluster_adapter.join()
+                print("Embedding clustering completed.")
+
 
             
             return analysis_results
