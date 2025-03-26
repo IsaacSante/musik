@@ -109,16 +109,16 @@ class EmbeddingProcessor:
         print("EmbeddingProcessor worker thread shut down.")
 
         # Perform clustering if requested
-        if cluster and self.embeddings:
-            from src.analyzer.embedding_cluster_adapter import EmbeddingClusterAdapter
-            cluster_adapter = EmbeddingClusterAdapter(
-                self, 
-                radius=radius, 
-                output_file=output_file.replace('.png', '_clusters.png')
-            )
-            cluster_adapter.start()
-            cluster_adapter.join(timeout=10.0)
-            print("Clustering completed.")
+        # if cluster and self.embeddings:
+        #     from src.analyzer.embedding_cluster_adapter import EmbeddingClusterAdapter
+        #     cluster_adapter = EmbeddingClusterAdapter(
+        #         self, 
+        #         radius=radius, 
+        #         output_file=output_file.replace('.png', '_clusters.png')
+        #     )
+        #     cluster_adapter.start()
+        #     cluster_adapter.join(timeout=10.0)
+        #     print("Clustering completed.")
 
         # Trigger visualization if requested
         if visualize:
