@@ -25,7 +25,7 @@ def main():
         print("ERROR: GOOGLE_API_KEY environment variable not set.")
         return
 
-    song_info = SongInfo(headless=True) # Or False for debugging
+    song_info = SongInfo(headless=False) # Or False for debugging
     try:
         # Instantiate LLMAnalysis once
         llm_analyzer = LLMAnalysis()
